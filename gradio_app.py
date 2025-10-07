@@ -1,6 +1,7 @@
 """SeedVR2 Gradio interface for image, video, and batch upscaling."""
 
 import os
+import subprocess
 
 # Ensure torch uses async allocator like CLI (must run before importing torch)
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "backend:cudaMallocAsync")
@@ -142,7 +143,7 @@ def _extract_frames(
     return stacked, fps
 
 
-def _save_video(frames: torch.Tensor, fps: float) -> str:
+def _save_video(frames: torch.Tensor, fps: float, audio_source: Optional[str] = None) -> str:
     tmp_file = tempfile.NamedTemporaryFile(prefix="seedvr2_video_", suffix=".mp4", delete=False)
     tmp_file.close()
     output_path = Path(tmp_file.name)
@@ -161,6 +162,56 @@ def _save_video(frames: torch.Tensor, fps: float) -> str:
         writer.write(bgr)
 
     writer.release()
+
+    if audio_source:
+        audio_path = Path(audio_source)
+        if audio_path.exists():
+            ffmpeg_bin = shutil.which("ffmpeg")
+            if ffmpeg_bin:
+                tmp_audio = tempfile.NamedTemporaryFile(prefix="seedvr2_audio_", suffix=".mp4", delete=False)
+                tmp_audio.close()
+                merged_path = Path(tmp_audio.name)
+                cmd = [
+                    ffmpeg_bin,
+                    "-y",
+                    "-loglevel",
+                    "error",
+                    "-i",
+                    str(output_path),
+                    "-i",
+                    str(audio_path),
+                    "-map",
+                    "0:v:0",
+                    "-map",
+                    "1:a?",
+                    "-c:v",
+                    "copy",
+                    "-c:a",
+                    "copy",
+                    "-shortest",
+                    str(merged_path),
+                ]
+                result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                if result.returncode == 0 and merged_path.exists():
+                    try:
+                        output_path.unlink(missing_ok=True)
+                    except TypeError:
+                        if output_path.exists():
+                            output_path.unlink()
+                    shutil.move(str(merged_path), str(output_path))
+                else:
+                    print("⚠️ FFmpeg failed to merge audio; returning silent video.")
+                    if merged_path.exists():
+                        try:
+                            merged_path.unlink(missing_ok=True)
+                        except TypeError:
+                            if merged_path.exists():
+                                merged_path.unlink()
+            else:
+                print("ℹ️ FFmpeg not found; returning silent video.")
+        else:
+            print("ℹ️ Audio source not found; returning silent video.")
+
     return str(output_path)
 
 
@@ -215,6 +266,25 @@ def _run_generation(
 ):
     download_weight(model)
     runner = RunnerManager.get_runner(model, preserve_vram=preserve_vram, debug=debug)
+
+    # Ensure cached runner modules return to GPU when VRAM preservation is off
+    if not preserve_vram and torch.cuda.is_available():
+        blockswap_active = getattr(runner, '_blockswap_active', False)
+        if not blockswap_active and runner is not None:
+            target_device = torch.device('cuda')
+            try:
+                current_device = next(runner.dit.parameters()).device
+            except StopIteration:
+                current_device = target_device
+            if current_device != target_device:
+                runner.dit = runner.dit.to(target_device)
+            if hasattr(runner, 'vae') and runner.vae is not None:
+                try:
+                    vae_device = next(runner.vae.parameters()).device
+                except StopIteration:
+                    vae_device = target_device
+                if vae_device != target_device:
+                    runner.vae = runner.vae.to(target_device)
 
     def _progress_callback(batch_idx: int, total_batches: int, frames_in_batch: int, message: str = ""):
         if progress and total_batches > 0:
@@ -326,7 +396,7 @@ def upscale_video(
 
     if output_format == "video":
         progress(0.9, desc="Encoding video")
-        video_file = _save_video(result, fps)
+        video_file = _save_video(result, fps, audio_source=video_path)
         progress(1.0, desc="Completed")
         return video_file, gr.update(value=video_file, visible=True), "Video upscaled successfully."
 
@@ -411,7 +481,7 @@ def batch_process(
                 stem = file_path.stem + "_upscaled"
                 if output_format == "video":
                     video_out_dir = tmp_dir / f"{stem}.mp4"
-                    video_path_result = _save_video(result, fps)
+                    video_path_result = _save_video(result, fps, audio_source=str(file_path))
                     shutil.move(video_path_result, video_out_dir)
                     logs.append(f"✅ {file_path.name} -> {video_out_dir.name}")
                 else:
