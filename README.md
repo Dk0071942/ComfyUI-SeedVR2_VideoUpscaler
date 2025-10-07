@@ -19,6 +19,7 @@ Can run as **Multi-GPU standalone** too, see [🖥️ Run as Standalone](#️-ru
 - [🔧 Requirements](#-requirements)
 - [📦 Installation](#-installation)
 - [📖 Usage](#-usage)
+- [🖥️ Gradio App](#️-gradio-app)
 - [🖥️ Run as Standalone](#️-run-as-standalone)
 - [📊 Benchmarks](#-benchmarks)
 - [⚠️ Limitations](#-Limitations)
@@ -183,6 +184,25 @@ Of course, the output resolution also has an impact, so if your hardware doesn't
    - Enable debug mode to monitor memory usage
    - The first 1-2 blocks might show longer swap times - this is normal
    - Combine with `preserve_vram=True` for maximum memory savings
+
+## 🖥️ Gradio App
+
+Prefer a simple GUI without ComfyUI? Launch the bundled Gradio interface:
+
+1. Ensure the project dependencies are installed (they now include Gradio):
+   ```bash
+   pip install -r requirements.txt
+   ```
+2. Start the app from the repository root:
+   ```bash
+   python3 gradio_app.py
+   ```
+3. Open the printed local URL in your browser. The interface provides three tabs:
+   - **Image Upscaling** – drop in a still image and configure model/seed/output size.
+   - **Video Upscaling** – upload a video, pick batch size and output format (mp4 or PNG sequence).
+   - **Batch Processing** – queue mixed images/videos and download a zipped archive of results.
+
+Models are cached automatically after the first download. Use the *Clear cached models* utility button if you need to release GPU memory between runs.
 
 ## 🖥️ Run as Standalone
 
