@@ -195,7 +195,7 @@ Prefer a simple GUI without ComfyUI? Launch the bundled Gradio interface:
    ```
 2. Start the app from the repository root:
    ```bash
-   python3 gradio_app.py
+   python3 app_video_upscaler.py
    ```
 3. Open the printed local URL in your browser. The interface provides three tabs:
    - **Image Upscaling** – drop in a still image and configure model/seed/output size.

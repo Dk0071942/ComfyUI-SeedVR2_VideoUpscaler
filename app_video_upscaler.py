@@ -84,6 +84,29 @@ INFERENCE_LOCK = threading.Lock()
 # ---------------------------------------------------------------------------
 # Helper utilities
 # ---------------------------------------------------------------------------
+def _env_flag(name: str, default: bool = False) -> bool:
+    """Return True if the environment variable is set to a truthy value."""
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _resolve_basic_auth() -> Optional[List[Tuple[str, str]]]:
+    """Build a credentials list for Gradio basic auth based on environment variables."""
+    if not _env_flag("GRADIO_AUTH_ENABLED", default=False):
+        return None
+
+    username = os.getenv("GRADIO_AUTH_USERNAME", "").strip()
+    password = os.getenv("GRADIO_AUTH_PASSWORD", "")
+
+    if not username or not password:
+        print("⚠️ Gradio auth enabled but username or password missing; skipping authentication.")
+        return None
+
+    return [(username, password)]
+
+
 def _prepare_image_tensor(image: Image.Image) -> torch.Tensor:
     image = image.convert("RGB")
     array = np.asarray(image, dtype=np.float32) / 255.0
@@ -252,6 +275,30 @@ def _resolve_input_path(file_input: Any) -> Optional[str]:
     return None
 
 
+def _load_image_input(image_input: Any) -> Tuple[Image.Image, Optional[Path]]:
+    """Load an image from Gradio input and return it along with its source path if available."""
+    if isinstance(image_input, Image.Image):
+        filename = getattr(image_input, "filename", "") or image_input.info.get("filename", "")
+        try:
+            source_path = Path(filename).expanduser() if filename else None
+        except Exception:
+            source_path = None
+        return image_input, source_path
+
+    resolved_path = _resolve_input_path(image_input)
+    if not resolved_path:
+        raise gr.Error("Please upload an image to upscale.")
+
+    path = Path(resolved_path).expanduser()
+    if not path.exists():
+        raise gr.Error(f"Uploaded image not found: {resolved_path}")
+
+    with Image.open(path) as src:
+        image = src.copy()
+
+    return image, path
+
+
 def _run_generation(
     images: torch.Tensor,
     model: str,
@@ -313,7 +360,7 @@ def _run_generation(
 # Image workflow
 # ---------------------------------------------------------------------------
 def upscale_image(
-    image: Image.Image,
+    image_input: Any,
     model: str,
     resolution: int,
     cfg_scale: float,
@@ -321,12 +368,13 @@ def upscale_image(
     preserve_vram: bool,
     debug: bool,
 ):
-    if image is None:
+    if image_input is None:
         raise gr.Error("Please upload an image to upscale.")
 
     progress = gr.Progress(track_tqdm=True)
     progress(0, desc="Preparing image")
 
+    image, source_path = _load_image_input(image_input)
     tensor = _prepare_image_tensor(image)
     result = _run_generation(
         images=tensor,
@@ -345,8 +393,12 @@ def upscale_image(
         raise RuntimeError("Generation returned no frames.")
 
     output = _tensor_to_pil(result[0])
+    stem = source_path.stem if source_path else "upscaled_image"
+    tmp_dir = Path(tempfile.mkdtemp(prefix="seedvr2_image_"))
+    output_path = tmp_dir / f"{stem}.png"
+    output.save(output_path, format="PNG")
     progress(1.0, desc="Completed")
-    return output, "Image upscaled successfully."
+    return output, str(output_path), "Image upscaled successfully."
 
 
 # ---------------------------------------------------------------------------
@@ -407,99 +459,6 @@ def upscale_video(
 
 
 # ---------------------------------------------------------------------------
-# Batch workflow
-# ---------------------------------------------------------------------------
-IMAGE_EXT = {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
-VIDEO_EXT = {".mp4", ".mov", ".mkv", ".avi", ".webm"}
-
-
-def batch_process(
-    files: List[Any],
-    model: str,
-    resolution: int,
-    cfg_scale: float,
-    seed: int,
-    batch_size: int,
-    temporal_overlap: int,
-    preserve_vram: bool,
-    output_format: str,
-    skip_first_frames: int,
-    frame_cap: int,
-    debug: bool,
-):
-    if not files:
-        raise gr.Error("Please add at least one image or video file.")
-
-    progress = gr.Progress(track_tqdm=True)
-    tmp_dir = Path(tempfile.mkdtemp(prefix="seedvr2_batch_"))
-    logs: List[str] = []
-
-    for idx, file_info in enumerate(files, start=1):
-        resolved_path = _resolve_input_path(file_info)
-        if not resolved_path:
-            logs.append("⚠️ Skipped entry with no file path")
-            continue
-
-        file_path = Path(resolved_path)
-
-        suffix = file_path.suffix.lower()
-        progress((idx - 1) / max(len(files), 1), desc=f"Processing {file_path.name}")
-
-        try:
-            if suffix in IMAGE_EXT:
-                with Image.open(file_path) as img:
-                    tensor = _prepare_image_tensor(img)
-                result = _run_generation(
-                    images=tensor,
-                    model=model,
-                    resolution=resolution,
-                    cfg_scale=cfg_scale,
-                    seed=seed,
-                    batch_size=1,
-                    preserve_vram=preserve_vram,
-                    temporal_overlap=0,
-                    debug=debug,
-                    progress=None,
-                )
-                output_path = tmp_dir / f"{file_path.stem}_upscaled.png"
-                _tensor_to_pil(result[0]).save(output_path)
-                logs.append(f"✅ {file_path.name} -> {output_path.name}")
-            elif suffix in VIDEO_EXT:
-                frames, fps = _extract_frames(str(file_path), skip_first_frames, frame_cap)
-                result = _run_generation(
-                    images=frames,
-                    model=model,
-                    resolution=resolution,
-                    cfg_scale=cfg_scale,
-                    seed=seed,
-                    batch_size=batch_size,
-                    preserve_vram=preserve_vram,
-                    temporal_overlap=temporal_overlap,
-                    debug=debug,
-                    progress=None,
-                )
-                stem = file_path.stem + "_upscaled"
-                if output_format == "video":
-                    video_out_dir = tmp_dir / f"{stem}.mp4"
-                    video_path_result = _save_video(result, fps, audio_source=str(file_path))
-                    shutil.move(video_path_result, video_out_dir)
-                    logs.append(f"✅ {file_path.name} -> {video_out_dir.name}")
-                else:
-                    archive_path = _save_png_sequence(result, stem)
-                    dest_path = tmp_dir / Path(archive_path).name
-                    shutil.move(archive_path, dest_path)
-                    logs.append(f"✅ {file_path.name} -> {dest_path.name}")
-            else:
-                logs.append(f"⚠️ Skipped unsupported file: {file_path.name}")
-        except Exception as exc:
-            logs.append(f"❌ {file_path.name}: {exc}")
-
-    archive = shutil.make_archive(str(tmp_dir), "zip", tmp_dir)
-    progress(1.0, desc="Batch complete")
-    return archive, "\n".join(logs)
-
-
-# ---------------------------------------------------------------------------
 # Gradio UI
 # ---------------------------------------------------------------------------
 MODEL_OPTIONS = [
@@ -521,14 +480,14 @@ def build_interface():
         gr.Markdown(
             """
             # SeedVR2 Upscaler
-            Upscale single images, videos, or batches using the SeedVR2 diffusion pipeline.
+            Upscale single images or videos using the SeedVR2 diffusion pipeline.
             """
         )
 
         with gr.Tab("Image Upscaling"):
             with gr.Row():
                 with gr.Column():
-                    image_input = gr.Image(label="Input Image", type="pil")
+                    image_input = gr.Image(label="Input Image", type="filepath")
                     model_dropdown = gr.Dropdown(MODEL_OPTIONS, value=MODEL_OPTIONS[1], label="Model")
                     resolution_slider = gr.Slider(512, 2048, value=1072, step=16, label="Target short side (px)")
                     cfg_scale_slider = gr.Slider(0.5, 2.0, value=1.0, step=0.05, label="CFG Scale")
@@ -538,6 +497,7 @@ def build_interface():
                     image_button = gr.Button("Upscale Image", variant="primary")
                 with gr.Column():
                     image_output = gr.Image(label="Upscaled Image")
+                    image_download = gr.File(label="Download PNG")
                     image_status = gr.Textbox(label="Status", interactive=False)
 
             image_button.click(
@@ -551,7 +511,7 @@ def build_interface():
                     preserve_checkbox,
                     debug_checkbox,
                 ],
-                outputs=[image_output, image_status],
+                outputs=[image_output, image_download, image_status],
             )
 
         with gr.Tab("Video Upscaling"):
@@ -594,45 +554,6 @@ def build_interface():
                 outputs=[video_file_output, video_preview_output, video_status],
             )
 
-        with gr.Tab("Batch Processing"):
-            with gr.Row():
-                with gr.Column():
-                    batch_files = gr.File(label="Images or Videos", file_count="multiple")
-                    model_dropdown_b = gr.Dropdown(MODEL_OPTIONS, value=MODEL_OPTIONS[1], label="Model")
-                    resolution_slider_b = gr.Slider(512, 2048, value=1072, step=16, label="Target short side (px)")
-                    cfg_scale_slider_b = gr.Slider(0.5, 2.0, value=1.0, step=0.05, label="CFG Scale")
-                    seed_slider_b = gr.Slider(0, 2**32 - 1, value=100, step=1, label="Seed")
-                    batch_size_slider_b = gr.Slider(1, 65, value=5, step=4, label="Video batch size")
-                    temporal_overlap_slider_b = gr.Slider(0, 12, value=0, step=1, label="Temporal overlap (videos)")
-                    output_format_radio_b = gr.Radio(["video", "png"], value="video", label="Video output format")
-                    skip_frames_slider_b = gr.Slider(0, 100, value=0, step=1, label="Skip first N video frames")
-                    frame_cap_slider_b = gr.Slider(0, 2000, value=0, step=10, label="Max video frames (0 = all)")
-                    preserve_checkbox_b = gr.Checkbox(value=False, label="Preserve VRAM")
-                    debug_checkbox_b = gr.Checkbox(value=False, label="Enable debug logging")
-                    batch_button = gr.Button("Run Batch", variant="primary")
-                with gr.Column():
-                    batch_output_file = gr.File(label="Batch archive")
-                    batch_output_log = gr.Textbox(label="Log", lines=15)
-
-            batch_button.click(
-                batch_process,
-                inputs=[
-                    batch_files,
-                    model_dropdown_b,
-                    resolution_slider_b,
-                    cfg_scale_slider_b,
-                    seed_slider_b,
-                    batch_size_slider_b,
-                    temporal_overlap_slider_b,
-                    preserve_checkbox_b,
-                    output_format_radio_b,
-                    skip_frames_slider_b,
-                    frame_cap_slider_b,
-                    debug_checkbox_b,
-                ],
-                outputs=[batch_output_file, batch_output_log],
-            )
-
         with gr.Accordion("Utilities", open=False):
             clear_button = gr.Button("Clear cached models")
             clear_status = gr.Textbox(label="Cache status", interactive=False)
@@ -643,7 +564,23 @@ def build_interface():
 
 def main():
     demo = build_interface()
-    demo.launch()
+    launch_kwargs: dict[str, Any] = {}
+
+    server_name = os.getenv("GRADIO_SERVER_NAME", "").strip() or "127.0.0.1"
+    launch_kwargs["server_name"] = server_name
+
+    port_raw = os.getenv("GRADIO_SERVER_PORT", "7860").strip()
+    try:
+        launch_kwargs["server_port"] = int(port_raw)
+    except ValueError:
+        print(f"⚠️ Invalid GRADIO_SERVER_PORT '{port_raw}', defaulting to 7860.")
+        launch_kwargs["server_port"] = 7860
+
+    auth_credentials = _resolve_basic_auth()
+    if auth_credentials:
+        launch_kwargs["auth"] = auth_credentials
+
+    demo.launch(**launch_kwargs)
 
 
 if __name__ == "__main__":
