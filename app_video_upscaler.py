@@ -166,10 +166,19 @@ def _extract_frames(
     return stacked, fps
 
 
-def _save_video(frames: torch.Tensor, fps: float, audio_source: Optional[str] = None) -> str:
-    tmp_file = tempfile.NamedTemporaryFile(prefix="seedvr2_video_", suffix=".mp4", delete=False)
-    tmp_file.close()
-    output_path = Path(tmp_file.name)
+def _save_video(
+    frames: torch.Tensor,
+    fps: float,
+    audio_source: Optional[str] = None,
+    stem: Optional[str] = None,
+) -> str:
+    if stem:
+        tmp_dir = Path(tempfile.mkdtemp(prefix="seedvr2_video_"))
+        output_path = tmp_dir / f"{stem}.mp4"
+    else:
+        tmp_file = tempfile.NamedTemporaryFile(prefix="seedvr2_video_", suffix=".mp4", delete=False)
+        tmp_file.close()
+        output_path = Path(tmp_file.name)
 
     frames_np = frames.cpu().numpy()
     frames_np = (frames_np * 255.0).astype(np.uint8)
@@ -444,11 +453,11 @@ def upscale_video(
     if result.shape[0] == 0:
         raise RuntimeError("Generation returned no frames.")
 
-    stem = Path(video_path).stem + "_upscaled"
+    stem = Path(video_path).stem + "_enhanced"
 
     if output_format == "video":
         progress(0.9, desc="Encoding video")
-        video_file = _save_video(result, fps, audio_source=video_path)
+        video_file = _save_video(result, fps, audio_source=video_path, stem=stem)
         progress(1.0, desc="Completed")
         return video_file, gr.update(value=video_file, visible=True), "Video upscaled successfully."
 
