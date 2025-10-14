@@ -30,9 +30,9 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
 COPY . .
 
 # Default auth configuration; override via environment in production.
-ENV GRADIO_AUTH_ENABLED="false" \
-    GRADIO_AUTH_USERNAME="" \
-    GRADIO_AUTH_PASSWORD="" \
+ENV GOAVA_AUTH_ENABLED="false" \
+    GOAVA_AUTH_USERNAME="" \
+    GOAVA_AUTH_PASSWORD="" \
     GRADIO_SERVER_NAME="0.0.0.0" \
     GRADIO_SERVER_PORT="7860" \
     PORT="7860"

@@ -93,15 +93,15 @@ def _env_flag(name: str, default: bool = False) -> bool:
 
 
 def _resolve_basic_auth() -> Optional[List[Tuple[str, str]]]:
-    """Build a credentials list for Gradio basic auth based on environment variables."""
-    if not _env_flag("GRADIO_AUTH_ENABLED", default=False):
+    """Build a credentials list for Gradio basic auth based on goAVA environment variables."""
+    if not _env_flag("GOAVA_AUTH_ENABLED", default=False):
         return None
 
-    username = os.getenv("GRADIO_AUTH_USERNAME", "").strip()
-    password = os.getenv("GRADIO_AUTH_PASSWORD", "")
+    username = (os.getenv("GOAVA_AUTH_USERNAME") or "").strip()
+    password = os.getenv("GOAVA_AUTH_PASSWORD")
 
     if not username or not password:
-        print("⚠️ Gradio auth enabled but username or password missing; skipping authentication.")
+        print("⚠️ GOAVA_AUTH_ENABLED is true but GOAVA_AUTH_USERNAME or GOAVA_AUTH_PASSWORD is missing; skipping authentication.")
         return None
 
     return [(username, password)]
